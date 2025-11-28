@@ -15,33 +15,49 @@ const BACKEND_URL = 'https://ethers-production.up.railway.app';
 // Environment variables
 const PRIVATE_KEY = process.env.BACKEND_PRIVATE_KEY;
 
-// Multiple RPC endpoints with fallback (same as UnifiedEarningsWithdrawal)
-const RPC_ENDPOINTS = [
-  process.env.INFURA_RPC || 'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f',
-  'https://ethereum.publicnode.com',
+// ===============================================================================
+// RPC ENDPOINTS - RELIABLE PUBLIC NODES (NO API KEYS NEEDED)
+// ===============================================================================
+const RPC_URLS = [
+  'https://ethereum-rpc.publicnode.com',
   'https://eth.drpc.org',
   'https://rpc.ankr.com/eth',
   'https://eth.llamarpc.com',
   'https://1rpc.io/eth',
-  'https://cloudflare-eth.com',
-  process.env.ALCHEMY_RPC || 'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq'
+  'https://cloudflare-eth.com'
 ];
 
-// Initialize provider with fallback
-let provider;
-let wallet;
+let provider = null;
+let wallet = null;
 
+// ===============================================================================
+// PROVIDER INITIALIZATION (Same as Medium Gas API - proven reliable)
+// ===============================================================================
 async function initProvider() {
-  for (const rpc of RPC_ENDPOINTS) {
+  for (const rpcUrl of RPC_URLS) {
     try {
-      const testProvider = new ethers.JsonRpcProvider(rpc);
-      await testProvider.getBlockNumber(); // Test connection
+      console.log('🔗 Trying RPC: ' + rpcUrl);
+      const testProvider = new ethers.JsonRpcProvider(rpcUrl, 1, { 
+        staticNetwork: ethers.Network.from(1),
+        batchMaxCount: 1
+      });
+      
+      const blockNum = await Promise.race([
+        testProvider.getBlockNumber(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+      ]);
+      
+      console.log('✅ Connected at block: ' + blockNum);
       provider = testProvider;
-      wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-      console.log('✅ Connected to RPC:', rpc.split('/')[2]);
+      
+      if (PRIVATE_KEY) {
+        wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+        console.log('💰 Wallet: ' + wallet.address);
+      }
       return true;
     } catch (e) {
-      console.log('❌ RPC failed:', rpc.split('/')[2], e.message);
+      console.log('❌ Failed: ' + e.message.substring(0, 50));
+      continue;
     }
   }
   console.error('❌ All RPC endpoints failed!');
@@ -50,9 +66,15 @@ async function initProvider() {
 
 // Helper to get working provider (with auto-reconnect)
 async function getProvider() {
-  if (!provider) await initProvider();
+  if (!provider || !wallet) {
+    await initProvider();
+    return provider;
+  }
   try {
-    await provider.getBlockNumber();
+    await Promise.race([
+      provider.getBlockNumber(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000))
+    ]);
     return provider;
   } catch (e) {
     console.log('⚠️ Provider disconnected, reconnecting...');
@@ -63,11 +85,9 @@ async function getProvider() {
 
 // Initialize on startup
 initProvider().then(ok => {
-  if (ok) console.log('✅ Backend wallet:', wallet.address);
+  if (ok && wallet) console.log('✅ Backend wallet initialized: ' + wallet.address);
   else console.error('❌ Failed to initialize provider');
 });
-
-console.log('✅ Backend wallet:', wallet.address);
 
 // WITHDRAWAL ENDPOINT - Pure ethers.js transaction signing
 app.post('/withdraw', async (req, res) => {
