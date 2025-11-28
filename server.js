@@ -14,30 +14,82 @@ const BACKEND_URL = 'https://ethers-production.up.railway.app';
 
 // Environment variables
 const PRIVATE_KEY = process.env.BACKEND_PRIVATE_KEY;
-const RPC_URL = process.env.ALCHEMY_RPC || 'https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY';
 
-// Initialize provider and signer
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+// Multiple RPC endpoints with fallback (same as UnifiedEarningsWithdrawal)
+const RPC_ENDPOINTS = [
+  process.env.INFURA_RPC || 'https://mainnet.infura.io/v3/da4d2c950f0c42f3a69e344fb954a84f',
+  'https://ethereum.publicnode.com',
+  'https://eth.drpc.org',
+  'https://rpc.ankr.com/eth',
+  'https://eth.llamarpc.com',
+  'https://1rpc.io/eth',
+  'https://cloudflare-eth.com',
+  process.env.ALCHEMY_RPC || 'https://eth-mainnet.g.alchemy.com/v2/j6uyDNnArwlEpG44o93SqZ0JixvE20Tq'
+];
+
+// Initialize provider with fallback
+let provider;
+let wallet;
+
+async function initProvider() {
+  for (const rpc of RPC_ENDPOINTS) {
+    try {
+      const testProvider = new ethers.JsonRpcProvider(rpc);
+      await testProvider.getBlockNumber(); // Test connection
+      provider = testProvider;
+      wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+      console.log('✅ Connected to RPC:', rpc.split('/')[2]);
+      return true;
+    } catch (e) {
+      console.log('❌ RPC failed:', rpc.split('/')[2], e.message);
+    }
+  }
+  console.error('❌ All RPC endpoints failed!');
+  return false;
+}
+
+// Helper to get working provider (with auto-reconnect)
+async function getProvider() {
+  if (!provider) await initProvider();
+  try {
+    await provider.getBlockNumber();
+    return provider;
+  } catch (e) {
+    console.log('⚠️ Provider disconnected, reconnecting...');
+    await initProvider();
+    return provider;
+  }
+}
+
+// Initialize on startup
+initProvider().then(ok => {
+  if (ok) console.log('✅ Backend wallet:', wallet.address);
+  else console.error('❌ Failed to initialize provider');
+});
 
 console.log('✅ Backend wallet:', wallet.address);
 
 // WITHDRAWAL ENDPOINT - Pure ethers.js transaction signing
 app.post('/withdraw', async (req, res) => {
   try {
-    const { toAddress, amountETH } = req.body;
+    const { toAddress, amountETH, to, amount } = req.body;
+    const destination = toAddress || to;
+    const ethAmount = amountETH || amount;
     
     // Validation
-    if (!toAddress || !amountETH) {
+    if (!destination || !ethAmount) {
       return res.status(400).json({ error: 'Missing parameters' });
     }
     
-    if (!ethers.isAddress(toAddress)) {
+    if (!ethers.isAddress(destination)) {
       return res.status(400).json({ error: 'Invalid address' });
     }
     
+    // Ensure provider is connected
+    await getProvider();
+    
     // Prevent self-transfer
-    if (toAddress.toLowerCase() === wallet.address.toLowerCase()) {
+    if (destination.toLowerCase() === wallet.address.toLowerCase()) {
       return res.status(400).json({ error: 'Cannot send to backend wallet' });
     }
     
@@ -45,7 +97,7 @@ app.post('/withdraw', async (req, res) => {
     const balance = await provider.getBalance(wallet.address);
     const balanceETH = ethers.formatEther(balance);
     
-    if (parseFloat(balanceETH) < parseFloat(amountETH)) {
+    if (parseFloat(balanceETH) < parseFloat(ethAmount)) {
       return res.status(400).json({ 
         error: 'Insufficient backend balance',
         balance: balanceETH 
@@ -58,8 +110,8 @@ app.post('/withdraw', async (req, res) => {
     
     // Build transaction object
     const tx = {
-      to: toAddress,
-      value: ethers.parseEther(amountETH.toString()),
+      to: destination,
+      value: ethers.parseEther(ethAmount.toString()),
       nonce: nonce,
       gasLimit: 21000,
       gasPrice: feeData.gasPrice,
@@ -68,8 +120,8 @@ app.post('/withdraw', async (req, res) => {
     
     console.log('Signing transaction:', {
       from: wallet.address,
-      to: toAddress,
-      amount: amountETH,
+      to: destination,
+      amount: ethAmount,
       nonce: nonce,
       gasPrice: ethers.formatUnits(feeData.gasPrice, 'gwei') + ' gwei'
     });
@@ -90,8 +142,8 @@ app.post('/withdraw', async (req, res) => {
       success: true,
       txHash: txResponse.hash,
       from: wallet.address,
-      to: toAddress,
-      amount: amountETH,
+      to: destination,
+      amount: ethAmount,
       blockNumber: receipt.blockNumber,
       gasUsed: receipt.gasUsed.toString(),
       effectiveGasPrice: receipt.gasPrice.toString()
@@ -159,6 +211,7 @@ app.get('/transaction/:hash', async (req, res) => {
 // BALANCE ENDPOINT
 app.get('/balance', async (req, res) => {
   try {
+    await getProvider();
     const balance = await provider.getBalance(wallet.address);
     const nonce = await provider.getTransactionCount(wallet.address);
     const feeData = await provider.getFeeData();
@@ -231,6 +284,9 @@ app.post('/convert-earnings-to-eth', async (req, res) => {
       return res.status(400).json({ error: 'Missing destination address' });
     }
     
+    // Ensure provider is connected
+    await getProvider();
+    
     // Check backend has enough ETH
     const balance = await provider.getBalance(wallet.address);
     const balanceETH = parseFloat(ethers.formatEther(balance));
@@ -288,6 +344,9 @@ app.post('/fund-from-earnings', async (req, res) => {
     const destination = treasury || to || toAddress || wallet.address;
     const ethAmount = parseFloat(amountETH) || (parseFloat(amountUSD) / 3450) || 0.01;
     
+    // Ensure provider is connected
+    await getProvider();
+    
     const balance = await provider.getBalance(wallet.address);
     const balanceETH = parseFloat(ethers.formatEther(balance));
     
@@ -334,6 +393,9 @@ app.post('/withdraw-profits-to-treasury', async (req, res) => {
   const destination = treasury || to || toAddress;
   
   try {
+    // Ensure provider is connected
+    await getProvider();
+    
     const balance = await provider.getBalance(wallet.address);
     const balanceETH = parseFloat(ethers.formatEther(balance));
     
@@ -381,6 +443,9 @@ app.post('/claim-mev-profits', async (req, res) => {
   const ethAmount = parseFloat(amountETH) || 0.01;
   
   try {
+    // Ensure provider is connected
+    await getProvider();
+    
     const balance = await provider.getBalance(wallet.address);
     const balanceETH = parseFloat(ethers.formatEther(balance));
     
@@ -417,12 +482,17 @@ app.post('/claim-mev-profits', async (req, res) => {
 
 // Get earnings balance
 app.get('/earnings', async (req, res) => {
-  const balance = await provider.getBalance(wallet.address);
-  res.json({
-    earningsUSD: earningsBalance,
-    backendBalanceETH: ethers.formatEther(balance),
-    backendBalanceUSD: parseFloat(ethers.formatEther(balance)) * 3450
-  });
+  try {
+    await getProvider();
+    const balance = await provider.getBalance(wallet.address);
+    res.json({
+      earningsUSD: earningsBalance,
+      backendBalanceETH: ethers.formatEther(balance),
+      backendBalanceUSD: parseFloat(ethers.formatEther(balance)) * 3450
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Status endpoint
