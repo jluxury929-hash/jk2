@@ -83,12 +83,6 @@ async function getProvider() {
   }
 }
 
-// Initialize on startup
-initProvider().then(ok => {
-  if (ok && wallet) console.log('✅ Backend wallet initialized: ' + wallet.address);
-  else console.error('❌ Failed to initialize provider');
-});
-
 // WITHDRAWAL ENDPOINT - Pure ethers.js transaction signing
 app.post('/withdraw', async (req, res) => {
   try {
@@ -542,7 +536,15 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Ethers.js Backend Online - Port ${PORT}`);
-  console.log(`🔑 Wallet: ${wallet.address}`);
+// Initialize provider first, THEN start server
+initProvider().then(ok => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Ethers.js Backend Online - Port ${PORT}`);
+    if (ok && wallet) {
+      console.log(`🔑 Wallet: ${wallet.address}`);
+      console.log(`✅ RPC Connected`);
+    } else {
+      console.log(`⚠️ Wallet initialization pending...`);
+    }
+  });
 });
